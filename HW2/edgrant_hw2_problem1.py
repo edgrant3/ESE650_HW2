@@ -53,3 +53,13 @@ np.set_printoptions(precision=3)
 # print(f'epsilon:\n{epsilon}')
 print(f'x:\n{x}')
 print(f'y:\n{y}')
+
+# --------------
+a_0_mean = -10
+a_0_var  = 0.5
+Cov_0 = np.array([[1, 0],
+                  [0, a_0_var]])
+mean_0 = np.array([[0],
+                   [a_0_mean]])
+
+def propagateDynamics(state, )
