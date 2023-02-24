@@ -34,21 +34,26 @@ def ADCtoAccel(adc):
     Input:  adc - (int np.array shape (3, N)) ADC reading
     Output: acc - (float np.array shape (3, N)) acceleration in m/s^2
     '''
-    bias        = np.array([0, 0, 0]).reshape(3,1)       # (mV)
-    sensitivity = np.array([3023.8, 3023.8, 3023.8]).reshape(3,1) # (mV/grav)
+    bias        = np.array([510.808, 500.994, 499]).reshape(3,1)       # (mV)
+    sensitivity = np.array([340.5, 340.5, 342.25]).reshape(3,1) # (mV/grav)
     return (adc.astype(np.float64) - bias) * 3300 / (1023 * sensitivity) * 9.81
 
-def ADCtoGyro(adc):
+def ADCtoGyro(adc, convert_to_rad=True):
     '''
     Converts ADC readings from gyroscope to rad/s
     Input:  adc - (int np.array shape (3, N)) ADC reading
     Output: gyr - (float np.array shape (3, N)) angular velocity in rad/s
+    z,x,y ordering!!!
     '''
-    bias        = np.array([0, 0, 0]).reshape(3,1)       # (mV)
-    sensitivity = np.array([250, 250, 250]).reshape(3,1) # (mV/(rad/sec))
-    return (adc.astype(np.float64) - bias) * 3300 / (1023 * sensitivity)
+    bias        = np.array([369.68, 373.568, 375.356]).reshape(3,1)       # (mV)
+    sensitivity = np.array([200, 200, 200]).reshape(3,1) # (mV/(rad/sec))
+    if convert_to_rad:
+        return (adc.astype(np.float64) - bias) * 3300 / (1023 * sensitivity) 
+    else:
+        return (adc.astype(np.float64) - bias) * 3300 / (1023 * sensitivity) * 180 / np.pi 
+    
 
-def VicontoRPY(vicon):
+def VicontoRPY(vicon_rots):
     '''
     COPILOT WRITTEN - CHECK THIS
     Converts Vicon rotation matrices to roll, pitch, yaw
@@ -57,12 +62,18 @@ def VicontoRPY(vicon):
     Output: pitch - (float np.array shape (N,)) pitch angles in radians
     Output: yaw   - (float np.array shape (N,)) yaw angles in radians
     '''
-    roll  = np.arctan2(vicon[2,1,:], vicon[2,2,:])
-    pitch = np.arctan2(-vicon[2,0,:], np.sqrt(vicon[2,1,:]**2 + vicon[2,2,:]**2))
-    yaw   = np.arctan2(vicon[1,0,:], vicon[0,0,:])
+    N = vicon_rots.shape[2]
+    roll  = np.zeros((N,))
+    pitch = np.zeros((N,))
+    yaw   = np.zeros((N,))
+
+    for i in range(N):
+        q = Quaternion()
+        q.from_rotm(vicon_rots[:,:,i])
+        roll[i], pitch[i], yaw[i] = q.euler_angles()
     return roll, pitch, yaw
 
-def plotStuff(accel, vicon_rpy=None):
+def plotStuff(accel, ts, roll, pitch, yaw):
     plt.figure(1)
     plt.plot(accel[0,:])
     plt.plot(accel[1,:])
@@ -73,11 +84,25 @@ def plotStuff(accel, vicon_rpy=None):
     plt.ylabel('Acceleration (m/s^2)')
 
     plt.figure(2)
-    plt.plot(np.linalg.norm(accel, axis=0))
+    plt.plot(np.ones(accel.shape[1]) * 9.81, 'k--')
+    plt.plot(np.linalg.norm(accel, axis=0), alpha=0.5)
     plt.title('Norm of Accelerometer Data')
-    plt.legend('magnitude of acceleration')
+    plt.legend(['magnitude of acceleration', '|g| (9.81 m/s^2)'])
     plt.xlabel('Time (s)')
     plt.ylabel('Acceleration (m/s^2)')
+    
+    plt.figure(3)
+    plt.plot(ts, roll, alpha=0.75)
+    plt.plot(ts, pitch, alpha=0.75)
+    plt.plot(ts, yaw, alpha=0.75)
+    plt.plot(ts, np.ones_like(ts) * np.pi / 2, 'k--', alpha=0.5)
+    plt.plot(ts, np.ones_like(ts) * (-np.pi) / 2, 'k--', alpha=0.5)
+    plt.plot(ts, np.ones_like(ts) * np.pi, 'k--', alpha=0.5)
+    plt.plot(ts, np.ones_like(ts) * (-np.pi), 'k--', alpha=0.5)
+    plt.title('RPY of Vicon')
+    plt.legend(['Roll', 'Pitch', 'Yaw'])
+    plt.xlabel('Time (s)')
+    plt.ylabel('Radians')
     plt.show()
 
 ''' CAUTION MOVING FORWARD:
@@ -97,11 +122,29 @@ def estimate_rot(data_num=1):
     accel, gyro, T = load_imu_data(data_num)
     vicon = load_vicon_data(data_num)
 
+    print(f'x accel avg (first 500): {np.mean(accel[0,0:500])}')
+    print(f'y accel avg (first 500): {np.mean(accel[1,0:500])}')
+    print(f'z accel avg (first 500): {np.mean(accel[2,0:500])}')
+    print(f'x gyro avg (first 500): {np.mean(gyro[0,0:500])}')
+    print(f'y gyro avg (first 500): {np.mean(gyro[1,0:500])}')
+    print(f'z gyro avg (first 500): {np.mean(gyro[2,0:500])}')
+
     # Convert ADC readings to physical units
     accel = ADCtoAccel(accel)
     gyro  = ADCtoGyro(gyro)
 
-    plotStuff(accel)
+    print(f'x accel avg transformed: {np.mean(accel[0,0:500])}')
+    print(f'y accel avg transformed: {np.mean(accel[1,0:500])}')
+    print(f'z accel avg transformed: {np.mean(accel[2,0:500])}')
+    print(f'x gyro avg transformed: {np.mean(gyro[0,0:500])}')
+    print(f'y gyro avg transformed: {np.mean(gyro[1,0:500])}')
+    print(f'z gyro avg transformed: {np.mean(gyro[2,0:500])}')
+
+
+
+    roll, pitch, yaw = VicontoRPY(vicon['rots'])
+
+    plotStuff(accel, vicon['ts'].ravel(), roll, pitch, yaw)
 
     # roll, pitch, yaw are numpy arrays of length T
     # return roll,pitch,yaw
