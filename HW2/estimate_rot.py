@@ -105,6 +105,15 @@ def plotStuff(accel, ts, roll, pitch, yaw):
     plt.ylabel('Radians')
     plt.show()
 
+def calibrationPrint(accel, gyro, str=''):
+    print("Average of first 500 timesteps:")
+    print(f'x accel avg {str}: {np.mean(accel[0,0:500])}')
+    print(f'y accel avg {str}: {np.mean(accel[1,0:500])}')
+    print(f'z accel avg {str}: {np.mean(accel[2,0:500])}')
+    print(f'z gyro avg {str}: {np.mean(gyro[0,0:500])}')
+    print(f'x gyro avg {str}: {np.mean(gyro[1,0:500])}')
+    print(f'y gyro avg {str}: {np.mean(gyro[2,0:500])}\n')
+
 ''' CAUTION MOVING FORWARD:
 (1) The orientation of the IMU need not be the same as the orientation of the Vicon
 coordinate frame. Plot all quantities in the arrays accel, gyro and vicon rotation
@@ -121,24 +130,13 @@ def estimate_rot(data_num=1):
 
     accel, gyro, T = load_imu_data(data_num)
     vicon = load_vicon_data(data_num)
-
-    print(f'x accel avg (first 500): {np.mean(accel[0,0:500])}')
-    print(f'y accel avg (first 500): {np.mean(accel[1,0:500])}')
-    print(f'z accel avg (first 500): {np.mean(accel[2,0:500])}')
-    print(f'x gyro avg (first 500): {np.mean(gyro[0,0:500])}')
-    print(f'y gyro avg (first 500): {np.mean(gyro[1,0:500])}')
-    print(f'z gyro avg (first 500): {np.mean(gyro[2,0:500])}')
+    calibrationPrint(accel, gyro, 'before transform')
 
     # Convert ADC readings to physical units
     accel = ADCtoAccel(accel)
     gyro  = ADCtoGyro(gyro)
+    calibrationPrint(accel, gyro, 'after transform')
 
-    print(f'x accel avg transformed: {np.mean(accel[0,0:500])}')
-    print(f'y accel avg transformed: {np.mean(accel[1,0:500])}')
-    print(f'z accel avg transformed: {np.mean(accel[2,0:500])}')
-    print(f'x gyro avg transformed: {np.mean(gyro[0,0:500])}')
-    print(f'y gyro avg transformed: {np.mean(gyro[1,0:500])}')
-    print(f'z gyro avg transformed: {np.mean(gyro[2,0:500])}')
 
 
 
