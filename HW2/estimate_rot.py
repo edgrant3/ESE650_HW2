@@ -125,6 +125,15 @@ acceleration in body-frame will result in a negative number reported by the IMU.
 See the IMU manual for more insight.
 '''
 
+class State:
+    def __init__(self, quat_vec, omegas):
+        self.q = Quaternion(quat_vec[0].astype(np.float64), quat_vec[1:])
+        self.w = omegas
+
+    def add(self, other_state):
+        
+        
+
 def generate_sigma_points(mean, cov):
     # Mean is (7,1) array, and cov is (6,6)
     
@@ -142,6 +151,7 @@ def generate_sigma_points(mean, cov):
     # must convert first 3 elements of offset term to 4-element quaternion
     mean_quat = Quaternion(np.float64(mean[0]), mean[1:4].ravel())
     for i in range(sig_pts.shape[1]):
+        # TODO: need to use Rodrigues', not vector quaternion
         offset_quat = Quaternion(0, offset[0:3, i])
         combo_quat  = offset_quat.__mul__(mean_quat)
         sig_pts[0:4, i] = combo_quat.q
@@ -175,8 +185,10 @@ def compute_GD_update(sig_pts, prev_state, R, threshold = 0.1):
     new_mean[4:] = np.mean(sig_pts[4:, :], axis=1)
 
     new_cov = np.zeros((6,6))
+    #can use np.cov
     new_cov[:3, :3] = (E - e_bar) @ (E - e_bar).T / sig_pts.shape[1] #(3, 2n) @ (2n, 3) = (3, 3)
-    new_cov[3:, 3:] = R + (sig_pts[4:, :] - new_mean[4:]) @ (sig_pts[4:, :] - new_mean[4:]).T / sig_pts.shape[1]
+    ### TODO - CHECK IF NEED TO ADD R HERE, I THINK NO...
+    new_cov[3:, 3:] =(sig_pts[4:, :] - new_mean[4:]) @ (sig_pts[4:, :] - new_mean[4:]).T / sig_pts.shape[1] # + R
 
     return new_mean, new_cov
         
@@ -206,12 +218,12 @@ def estimate_rot(data_num=1):
 
 #### TESTING ####
 if __name__ == '__main__':
-    # _ = estimate_rot(1)
+    _ = estimate_rot(1)
 
-    test_mean = np.array([0, 1, 2, 3, 4, 5, 6]).reshape(7,1) + 3
-    test_cov  = np.eye(6,6)
-    print(test_mean)
-    print(test_cov)
+    # test_mean = np.array([0, 1, 2, 3, 4, 5, 6]).reshape(7,1) + 3
+    # test_cov  = np.eye(6,6)
+    # print(test_mean)
+    # print(test_cov)
 
-    test_sig_pts = generate_sigma_points(test_mean, test_cov)
-    print(test_sig_pts.shape)
+    # test_sig_pts = generate_sigma_points(test_mean, test_cov)
+    # print(test_sig_pts.shape)
