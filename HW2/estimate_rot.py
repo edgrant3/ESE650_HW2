@@ -1,5 +1,6 @@
 import numpy as np
 from scipy import io
+from scipy import linalg
 # from scipy.spatial import transform
 from quaternion import Quaternion
 import math
@@ -51,7 +52,6 @@ def ADCtoGyro(adc, convert_to_rad=True):
         return (adc.astype(np.float64) - bias) * 3300 / (1023 * sensitivity) 
     else:
         return (adc.astype(np.float64) - bias) * 3300 / (1023 * sensitivity) * 180 / np.pi 
-    
 
 def VicontoRPY(vicon_rots):
     '''
@@ -125,6 +125,64 @@ acceleration in body-frame will result in a negative number reported by the IMU.
 See the IMU manual for more insight.
 '''
 
+def generate_sigma_points(mean, cov):
+    # Mean is (7,1) array, and cov is (6,6)
+    
+    # n is no. of covariance columns
+    n = cov.shape[1]
+
+    # offset is (n,2n) array where rows of sqrt(n*cov) become 
+    # columns added to mean to create sigma points
+    offset = (np.sqrt(n) * linalg.sqrtm(cov)).T
+    offset = np.hstack((offset, -offset))
+
+    sig_pts = np.zeros((n+1, 2*n))
+    sig_pts[-3:, :] += offset[-3:, :]
+
+    # must convert first 3 elements of offset term to 4-element quaternion
+    mean_quat = Quaternion(np.float64(mean[0]), mean[1:4].ravel())
+    for i in range(sig_pts.shape[1]):
+        offset_quat = Quaternion(0, offset[0:3, i])
+        combo_quat  = offset_quat.__mul__(mean_quat)
+        sig_pts[0:4, i] = combo_quat.q
+
+    return sig_pts
+
+def compute_GD_update(sig_pts, prev_state, R, threshold = 0.1):
+
+    # Initialize mean quat to previous state's quaternion
+    q_bar = Quaternion(np.float64(prev_state[0]), prev_state[1:4].ravel())
+    # Initialize error matrix (contains axis-angle representation of error)
+    E = np.ones(3, sig_pts.shape[1]) * np.inf
+    mean_err = np.inf
+
+    # Iterate until error is below threshold
+    while mean_err > threshold:
+        for i in range(sig_pts.shape[1]):
+            # Convert sigma point to quaternion
+            q_i = Quaternion(np.float64(sig_pts[0, i]), sig_pts[1:4, i].ravel())
+            # Compute error quaternion
+            q_err = q_i.__mul__(q_bar.inverse())
+            # Convert error quaternion to axis-angle representation
+            E[:, i] = q_err.axis_angle()
+
+        e_bar = np.mean(E, axis=1)
+        q_bar = q_bar.from_axis_angle(e_bar)
+        mean_err = np.linalg.norm(e_bar)
+
+    new_mean = np.zeros(7)
+    new_mean[0:4] = q_bar.q
+    new_mean[4:] = np.mean(sig_pts[4:, :], axis=1)
+
+    new_cov = np.zeros((6,6))
+    new_cov[:3, :3] = (E - e_bar) @ (E - e_bar).T / sig_pts.shape[1] #(3, 2n) @ (2n, 3) = (3, 3)
+    new_cov[3:, 3:] = R + (sig_pts[4:, :] - new_mean[4:]) @ (sig_pts[4:, :] - new_mean[4:]).T / sig_pts.shape[1]
+
+    return new_mean, new_cov
+        
+
+
+
 
 def estimate_rot(data_num=1):
 
@@ -138,8 +196,6 @@ def estimate_rot(data_num=1):
     calibrationPrint(accel, gyro, 'after transform')
 
 
-
-
     roll, pitch, yaw = VicontoRPY(vicon['rots'])
 
     plotStuff(accel, vicon['ts'].ravel(), roll, pitch, yaw)
@@ -150,4 +206,12 @@ def estimate_rot(data_num=1):
 
 #### TESTING ####
 if __name__ == '__main__':
-    _ = estimate_rot(1)
+    # _ = estimate_rot(1)
+
+    test_mean = np.array([0, 1, 2, 3, 4, 5, 6]).reshape(7,1) + 3
+    test_cov  = np.eye(6,6)
+    print(test_mean)
+    print(test_cov)
+
+    test_sig_pts = generate_sigma_points(test_mean, test_cov)
+    print(test_sig_pts.shape)
