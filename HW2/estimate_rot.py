@@ -19,16 +19,17 @@ def load_imu_data(data_num):
     accel = imu['vals'][0:3, :] # (3, 5645) array of ADC ints
     gyro  = imu['vals'][3:6, :] # (3, 5645) array of ADC ints
     T = np.shape(imu['ts'])[1]  # number of timesteps = 5645
-    return accel, gyro, T
+    ts = imu['ts'][0] - imu['ts'][0][0] # (5645,) array of timestamps
+    return accel, gyro, T, ts
 
 def load_vicon_data(data_num):
     # Load "ground truth" VICON data (COMMENT OUT FOR AUTOGRADER SUBMISSION)
     # dict with keys 'rots' and 'ts' := 
     # (3, 3, 5561) array of rotations | (1x5561) array of timestamps
     vicon = io.loadmat('vicon/viconRot' + str(data_num) + '.mat')
-    return vicon
+    tv = vicon['ts'][0] - vicon['ts'][0][0] # (5645,) array of timestamps
+    return vicon, tv
 
-# Helper functions for converting ADC readings to physical units
 def ADCtoAccel(adc):
     '''
     Converts ADC readings from accelerometer to m/s^2
@@ -73,32 +74,50 @@ def VicontoRPY(vicon_rots):
         roll[i], pitch[i], yaw[i] = q.euler_angles()
     return roll, pitch, yaw
 
-def plotStuff(accel, ts, roll, pitch, yaw):
+def preprocess_dataset(data_num):
+    # Load IMU data
+    accel, gyro, nT, T_sensor = load_imu_data(data_num)
+    vicon, T_vicon = load_vicon_data(data_num)
+    calibrationPrint(accel, gyro, 'before transform')
+
+    # Convert ADC readings to physical units
+    accel = ADCtoAccel(accel)
+    gyro  = ADCtoGyro(gyro)
+    calibrationPrint(accel, gyro, 'after transform')
+
+    # Convert vicon rotation matrices to roll, pitch, yaw
+    roll, pitch, yaw = VicontoRPY(vicon['rots'])
+
+    plotStuff(accel, T_sensor.ravel(), roll, pitch, yaw, T_vicon.ravel())
+
+    return accel, gyro, T_sensor, roll, pitch, yaw, T_vicon
+
+def plotStuff(accel, ts, roll, pitch, yaw, tv):
     plt.figure(1)
-    plt.plot(accel[0,:])
-    plt.plot(accel[1,:])
-    plt.plot(accel[2,:])
+    plt.plot(ts, accel[0,:])
+    plt.plot(ts, accel[1,:])
+    plt.plot(ts, accel[2,:])
     plt.legend(['x', 'y', 'z'])
     plt.title('Accelerometer Data')
     plt.xlabel('Time (s)')
     plt.ylabel('Acceleration (m/s^2)')
 
     plt.figure(2)
-    plt.plot(np.ones(accel.shape[1]) * 9.81, 'k--')
-    plt.plot(np.linalg.norm(accel, axis=0), alpha=0.5)
+    plt.plot(ts, np.ones(accel.shape[1]) * 9.81, 'k--')
+    plt.plot(ts, np.linalg.norm(accel, axis=0), alpha=0.5)
     plt.title('Norm of Accelerometer Data')
     plt.legend(['magnitude of acceleration', '|g| (9.81 m/s^2)'])
     plt.xlabel('Time (s)')
     plt.ylabel('Acceleration (m/s^2)')
     
     plt.figure(3)
-    plt.plot(ts, roll, alpha=0.75)
-    plt.plot(ts, pitch, alpha=0.75)
-    plt.plot(ts, yaw, alpha=0.75)
-    plt.plot(ts, np.ones_like(ts) * np.pi / 2, 'k--', alpha=0.5)
-    plt.plot(ts, np.ones_like(ts) * (-np.pi) / 2, 'k--', alpha=0.5)
-    plt.plot(ts, np.ones_like(ts) * np.pi, 'k--', alpha=0.5)
-    plt.plot(ts, np.ones_like(ts) * (-np.pi), 'k--', alpha=0.5)
+    plt.plot(tv, roll, alpha=0.75)
+    plt.plot(tv, pitch, alpha=0.75)
+    plt.plot(tv, yaw, alpha=0.75)
+    plt.plot(tv, np.ones_like(tv) * np.pi / 2, 'k--', alpha=0.5)
+    plt.plot(tv, np.ones_like(tv) * (-np.pi) / 2, 'k--', alpha=0.5)
+    plt.plot(tv, np.ones_like(tv) * np.pi, 'k--', alpha=0.5)
+    plt.plot(tv, np.ones_like(tv) * (-np.pi), 'k--', alpha=0.5)
     plt.title('RPY of Vicon')
     plt.legend(['Roll', 'Pitch', 'Yaw'])
     plt.xlabel('Time (s)')
@@ -127,16 +146,23 @@ See the IMU manual for more insight.
 
 class State:
     def __init__(self, quat_vec, omegas):
-        self.q = Quaternion(quat_vec[0].astype(np.float64), quat_vec[1:])
+        self.quat = Quaternion(quat_vec[0].astype(np.float64), quat_vec[1:])
         self.w = omegas
+        self.quat_state_vec = self.with_quat()
+        # self.axis_angle_state_vec = self.with_axis_angle()
 
-    def add(self, other_state):
-        
+    def with_quat(self):
+        # gives (7,1) state vector with first four elements as quaternion elements
+        return np.hstack((self.q.q, self.w)).reshape(self.quat.q.size+self.w.size, 1)
+
+    def with_axis_angle(self):
+        # replaces 4-element quaternion portion of state with its axis-angle represntation.
+        # This reduces the state dimensions from (7,1) to (6,1)
+        return np.hstack((self.q.axis_angle(), self.w)).reshape(self.quat.q.size+self.w.size, 1)
         
 
 def generate_sigma_points(mean, cov):
-    # Mean is (7,1) array, and cov is (6,6)
-    
+    # Mean is State object (where mean.q.shape = (7,1)), and cov is (6,6) numpy array
     # n is no. of covariance columns
     n = cov.shape[1]
 
@@ -145,20 +171,22 @@ def generate_sigma_points(mean, cov):
     offset = (np.sqrt(n) * linalg.sqrtm(cov)).T
     offset = np.hstack((offset, -offset))
 
-    sig_pts = np.zeros((n+1, 2*n))
+    # initialize sigma points of shape (7,2n)
+    # and merely add the angular velocity (last 3) copmponents to the offset
+    sig_pts = np.zeros((mean.quat_state_vec.shape[0], 2*n))
     sig_pts[-3:, :] += offset[-3:, :]
 
     # must convert first 3 elements of offset term to 4-element quaternion
-    mean_quat = Quaternion(np.float64(mean[0]), mean[1:4].ravel())
+    # then "add" them via quaternion multiplication
     for i in range(sig_pts.shape[1]):
-        # TODO: need to use Rodrigues', not vector quaternion
-        offset_quat = Quaternion(0, offset[0:3, i])
-        combo_quat  = offset_quat.__mul__(mean_quat)
+        offset_quat = Quaternion().from_axis_angle(offset[0:3, i])
+        combo_quat  = offset_quat.__mul__(mean)
         sig_pts[0:4, i] = combo_quat.q
 
     return sig_pts
 
-def compute_GD_update(sig_pts, prev_state, R, threshold = 0.1):
+
+def compute_GD_update(sig_pts, prev_state, threshold = 0.1):
 
     # Initialize mean quat to previous state's quaternion
     q_bar = Quaternion(np.float64(prev_state[0]), prev_state[1:4].ravel())
@@ -187,30 +215,92 @@ def compute_GD_update(sig_pts, prev_state, R, threshold = 0.1):
     new_cov = np.zeros((6,6))
     #can use np.cov
     new_cov[:3, :3] = (E - e_bar) @ (E - e_bar).T / sig_pts.shape[1] #(3, 2n) @ (2n, 3) = (3, 3)
-    ### TODO - CHECK IF NEED TO ADD R HERE, I THINK NO...
     new_cov[3:, 3:] =(sig_pts[4:, :] - new_mean[4:]) @ (sig_pts[4:, :] - new_mean[4:]).T / sig_pts.shape[1] # + R
 
     return new_mean, new_cov
-        
 
 
+def propagate_dynamics(sp, dt, R, use_noise=False):
+    
+    sp_propagated = np.zeros(sp.shape)
 
+    if use_noise:
+        # add noise to each sigma point along with dynamics
+        rng = np.random.default_rng(1998)
+        noise = np.zeros((sp.shape[0]-1, 1))       
+
+        for i in range(sp.shape[1]):
+            
+            for n_idx in range(sp.shape[0]-1):
+                noise[n_idx] = rng.normal(0, R[n_idx,n_idx], ())
+
+            q_delta = Quaternion().from_axis_angle(sp[-3:, i] * dt)
+            q_noise = Quaternion().from_axis_angle(noise[0:3, 0])
+            q_sp = Quaternion(np.float64(sp[0, i]), sp[1:4, i].ravel())
+
+            q_comb = q_sp.__mul__(q_noise.__mul__(q_delta))
+
+            sp_propagated[0:4,i] = q_comb.q
+            sp_propagated[4:,i] = sp[4:,i] + noise[3:,0]
+
+        return sp_propagated
+
+    else:
+        # just propagate sigma points through dynamics
+        for i in range(sp.shape[1]):
+
+            q_delta = Quaternion().from_axis_angle(sp[-3:, i] * dt)
+            q_sp = Quaternion(np.float64(sp[0, i]), sp[1:4, i].ravel())
+
+            q_comb = q_sp.__mul__(q_delta)
+
+            sp_propagated[0:4,i] = q_comb.q
+            sp_propagated[4:,i] = sp[4:,i]
+
+        return sp_propagated
+    
+def propagate_measurement(sp, Q, use_noise=False):
+    return 0
 
 def estimate_rot(data_num=1):
 
-    accel, gyro, T = load_imu_data(data_num)
-    vicon = load_vicon_data(data_num)
-    calibrationPrint(accel, gyro, 'before transform')
+    accel, gyro, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon = preprocess_dataset(data_num)
 
-    # Convert ADC readings to physical units
-    accel = ADCtoAccel(accel)
-    gyro  = ADCtoGyro(gyro)
-    calibrationPrint(accel, gyro, 'after transform')
+    ### (1) Initialize Parameters
+    # init state
+    state_0 = State(np.array([1, 0, 0, 0]), np.array([0, 0, 0]))
+    # init covariance matrix
+    cov_0 = np.eye(6, 6)
+    # init process noise covariance matrix
+    R = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10]])
+    # init measurement noise covariance matrix
+    Q = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10]])
+
+    means = [state_0]
+    mean_k_k = state_0.quat_state_vec
+    cov_k_k = cov_0
+    
+    for t in range(T_sensor.size - 1):
+        ### (2) Add Noise Component to Covariance
+        dt = T_sensor[t+1] - T_sensor[t]
+        cov_k_k += R * dt
+
+        ### (3) Generate Sigma Points
+        sp = generate_sigma_points(mean_k_k, cov_k_k)
+
+        ### (4) Propagate Sigma Points Thru Dynamics
+        sp_propagated = propagate_dynamics(sp, dt, R, means[t], use_noise=False)
+
+        ### (5) Compute Mean and Covariance of Propagated Sigma Points
+        mean_k1_k, cov_k1_k = compute_GD_update(sp_propagated, means[t])
+
+        ### (6) Compute Sigma Points with Updated Mean and Covariance
+        sp = generate_sigma_points(mean_k1_k, cov_k1_k)
+
+        ### (7) Propagate Sigma Points Thru Measurement Model
+        sp_propagated = propagate_measurement(sp, dt, R, means[t], use_noise=False)
 
 
-    roll, pitch, yaw = VicontoRPY(vicon['rots'])
-
-    plotStuff(accel, vicon['ts'].ravel(), roll, pitch, yaw)
 
     # roll, pitch, yaw are numpy arrays of length T
     # return roll,pitch,yaw
