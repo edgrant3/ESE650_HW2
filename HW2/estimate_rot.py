@@ -187,6 +187,7 @@ def generate_sigma_points(mean, cov):
 
 
 def compute_GD_update(sig_pts, prev_state, threshold = 0.1):
+    # TODO: rewrite/check function to match study group notes
 
     # Initialize mean quat to previous state's quaternion
     q_bar = Quaternion(np.float64(prev_state[0]), prev_state[1:4].ravel())
@@ -226,6 +227,8 @@ def propagate_dynamics(sp, dt, R, use_noise=False):
 
     if use_noise:
         # add noise to each sigma point along with dynamics
+        # will likely not do this, as we added noise to covariance before
+        # computing sigma points, so we are already accounting for noise
         rng = np.random.default_rng(1998)
         noise = np.zeros((sp.shape[0]-1, 1))       
 
@@ -259,10 +262,27 @@ def propagate_dynamics(sp, dt, R, use_noise=False):
 
         return sp_propagated
     
-def propagate_measurement(sp, Q, use_noise=False):
-    return 0
+def propagate_measurement(sp, g_w, use_noise=False):
+    sp_propagated = np.zeros((sp.shape[0]-1, sp.shape[1]))
+    if use_noise:
+        print(f'\nWARNING: Noise not implemented for measurement propagation\n')
+        return 0
+    else:
+        for i in range(sp.shape[1]):
+            q_sp = Quaternion(np.float64(sp[0, i]), sp[1:4, i].ravel())
+            q_g = Quaternion(0, g_w.ravel())
+            q_comb = q_sp.__mul__((q_g.__mul__(q_sp.inv())))
+
+            g_prime = q_comb.vec()
+
+            sp_propagated[0:3,i] = g_prime
+            sp_propagated[3:,i] = sp[-3:,i]
+
+        return sp_propagated
 
 def estimate_rot(data_num=1):
+    # TODO: factor in WARNINGS from handout (negative axes, etc.)
+    # TODO: make weights for sigma points (instead of just doing np.means)
 
     accel, gyro, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon = preprocess_dataset(data_num)
 
@@ -275,6 +295,8 @@ def estimate_rot(data_num=1):
     R = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10]])
     # init measurement noise covariance matrix
     Q = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10]])
+    # init gravity vector
+    g_w = np.array([0, 0, -9.81])
 
     means = [state_0]
     mean_k_k = state_0.quat_state_vec
@@ -289,7 +311,7 @@ def estimate_rot(data_num=1):
         sp = generate_sigma_points(mean_k_k, cov_k_k)
 
         ### (4) Propagate Sigma Points Thru Dynamics
-        sp_propagated = propagate_dynamics(sp, dt, R, means[t], use_noise=False)
+        sp_propagated = propagate_dynamics(sp, dt, R, use_noise=False)
 
         ### (5) Compute Mean and Covariance of Propagated Sigma Points
         mean_k1_k, cov_k1_k = compute_GD_update(sp_propagated, means[t])
@@ -298,7 +320,9 @@ def estimate_rot(data_num=1):
         sp = generate_sigma_points(mean_k1_k, cov_k1_k)
 
         ### (7) Propagate Sigma Points Thru Measurement Model
-        sp_propagated = propagate_measurement(sp, dt, R, means[t], use_noise=False)
+        sp_propagated = propagate_measurement(sp, g_w, use_noise=False)
+
+        ### (8) Compute Mean and Covariance of Propagated Sigma Points
 
 
 
