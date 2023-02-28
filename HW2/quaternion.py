@@ -16,6 +16,7 @@ class Quaternion:
         return self.q[1:4]
 
     def axis_angle(self):
+        # print(f'SCALAR: {self.scalar()}')
         theta = 2*math.acos(self.scalar())
         vec = self.vec()
         if (np.linalg.norm(vec) == 0):

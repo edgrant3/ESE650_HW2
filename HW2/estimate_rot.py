@@ -77,18 +77,20 @@ def VicontoRPY(vicon_rots):
 def preprocess_dataset(data_num):
     # Load IMU data
     accel, gyro, nT, T_sensor = load_imu_data(data_num)
+    
     vicon, T_vicon = load_vicon_data(data_num)
     calibrationPrint(accel, gyro, 'before transform')
 
     # Convert ADC readings to physical units
     accel = ADCtoAccel(accel)
     gyro  = ADCtoGyro(gyro)
+    accel[0:2,:] *= -1 # flip readings per Warning
     calibrationPrint(accel, gyro, 'after transform')
 
     # Convert vicon rotation matrices to roll, pitch, yaw
     roll, pitch, yaw = VicontoRPY(vicon['rots'])
 
-    plotStuff(accel, T_sensor.ravel(), roll, pitch, yaw, T_vicon.ravel())
+    # plotStuff(accel, T_sensor.ravel(), roll, pitch, yaw, T_vicon.ravel())
 
     return accel, gyro, T_sensor, roll, pitch, yaw, T_vicon
 
@@ -145,24 +147,25 @@ See the IMU manual for more insight.
 '''
 
 class State:
-    def __init__(self, quat_vec, omegas):
-        self.quat = Quaternion(quat_vec[0].astype(np.float64), quat_vec[1:])
-        self.w = omegas
+    def __init__(self, state_vec, state_cov):
+        self.quat = Quaternion(state_vec[0].astype(np.float64), state_vec[1:4].ravel())
+        self.w = state_vec[4:,0]
         self.quat_state_vec = self.with_quat()
+        self.cov = state_cov
         # self.axis_angle_state_vec = self.with_axis_angle()
 
     def with_quat(self):
         # gives (7,1) state vector with first four elements as quaternion elements
-        return np.hstack((self.q.q, self.w)).reshape(self.quat.q.size+self.w.size, 1)
+        return np.hstack((self.quat.q, self.w)).reshape(7, 1)
 
     def with_axis_angle(self):
         # replaces 4-element quaternion portion of state with its axis-angle represntation.
         # This reduces the state dimensions from (7,1) to (6,1)
-        return np.hstack((self.q.axis_angle(), self.w)).reshape(self.quat.q.size+self.w.size, 1)
+        return np.hstack((self.quat.axis_angle(), self.w)).reshape(self.quat.q.size+self.w.size, 1)
         
 
 def generate_sigma_points(mean, cov):
-    # Mean is State object (where mean.q.shape = (7,1)), and cov is (6,6) numpy array
+    # Mean is shape = (7,1), and cov is (6,6) 
     # n is no. of covariance columns
     n = cov.shape[1]
 
@@ -173,14 +176,16 @@ def generate_sigma_points(mean, cov):
 
     # initialize sigma points of shape (7,2n)
     # and merely add the angular velocity (last 3) copmponents to the offset
-    sig_pts = np.zeros((mean.quat_state_vec.shape[0], 2*n))
+    sig_pts = np.zeros((mean.shape[0], 2*n))
     sig_pts[-3:, :] += offset[-3:, :]
 
     # must convert first 3 elements of offset term to 4-element quaternion
     # then "add" them via quaternion multiplication
     for i in range(sig_pts.shape[1]):
-        offset_quat = Quaternion().from_axis_angle(offset[0:3, i])
-        combo_quat  = offset_quat.__mul__(mean)
+        offset_quat = Quaternion()
+        offset_quat.from_axis_angle(offset[0:3, i])
+        mean_quat = Quaternion(np.float64(mean[0]), mean[1:4].ravel())
+        combo_quat  = offset_quat * mean_quat
         sig_pts[0:4, i] = combo_quat.q
 
     return sig_pts
@@ -190,9 +195,9 @@ def compute_GD_update(sig_pts, prev_state, threshold = 0.1):
     # TODO: rewrite/check function to match study group notes
 
     # Initialize mean quat to previous state's quaternion
-    q_bar = Quaternion(np.float64(prev_state[0]), prev_state[1:4].ravel())
+    q_bar = Quaternion(np.float64(prev_state.quat.q[0]), prev_state.quat.q[1:4].ravel())
     # Initialize error matrix (contains axis-angle representation of error)
-    E = np.ones(3, sig_pts.shape[1]) * np.inf
+    E = np.ones((3, sig_pts.shape[1])) * np.inf
     mean_err = np.inf
 
     # Iterate until error is below threshold
@@ -201,21 +206,24 @@ def compute_GD_update(sig_pts, prev_state, threshold = 0.1):
             # Convert sigma point to quaternion
             q_i = Quaternion(np.float64(sig_pts[0, i]), sig_pts[1:4, i].ravel())
             # Compute error quaternion
-            q_err = q_i.__mul__(q_bar.inverse())
+            q_err = q_i.__mul__(q_bar.inv())
             # Convert error quaternion to axis-angle representation
             E[:, i] = q_err.axis_angle()
 
         e_bar = np.mean(E, axis=1)
-        q_bar = q_bar.from_axis_angle(e_bar)
+        q_bar.from_axis_angle(e_bar)
         mean_err = np.linalg.norm(e_bar)
 
-    new_mean = np.zeros(7)
-    new_mean[0:4] = q_bar.q
-    new_mean[4:] = np.mean(sig_pts[4:, :], axis=1)
+    new_mean = np.zeros((7,1))
+    new_mean[0:4] = q_bar.q.reshape(4,1)
+    new_mean[4:] = np.mean(sig_pts[4:, :], axis=1).reshape(3,1)
+
+    e_bar = e_bar.reshape(3,1)
 
     new_cov = np.zeros((6,6))
     #can use np.cov
-    new_cov[:3, :3] = (E - e_bar) @ (E - e_bar).T / sig_pts.shape[1] #(3, 2n) @ (2n, 3) = (3, 3)
+    # new_cov[:3, :3] = (E - e_bar) @ (E - e_bar).T / sig_pts.shape[1] #(3, 2n) @ (2n, 3) = (3, 3)
+    new_cov[:3, :3] = E @ E.T / sig_pts.shape[1] #(3, 2n) @ (2n, 3) = (3, 3)
     new_cov[3:, 3:] =(sig_pts[4:, :] - new_mean[4:]) @ (sig_pts[4:, :] - new_mean[4:]).T / sig_pts.shape[1] # + R
 
     return new_mean, new_cov
@@ -237,11 +245,15 @@ def propagate_dynamics(sp, dt, R, use_noise=False):
             for n_idx in range(sp.shape[0]-1):
                 noise[n_idx] = rng.normal(0, R[n_idx,n_idx], ())
 
-            q_delta = Quaternion().from_axis_angle(sp[-3:, i] * dt)
-            q_noise = Quaternion().from_axis_angle(noise[0:3, 0])
+            q_delta = Quaternion()
+            q_delta.from_axis_angle(sp[-3:, i] * dt)
+
+            q_noise = Quaternion()
+            q_noise.from_axis_angle(noise[0:3, 0])
+
             q_sp = Quaternion(np.float64(sp[0, i]), sp[1:4, i].ravel())
 
-            q_comb = q_sp.__mul__(q_noise.__mul__(q_delta))
+            q_comb = q_sp * q_noise * q_delta
 
             sp_propagated[0:4,i] = q_comb.q
             sp_propagated[4:,i] = sp[4:,i] + noise[3:,0]
@@ -252,10 +264,12 @@ def propagate_dynamics(sp, dt, R, use_noise=False):
         # just propagate sigma points through dynamics
         for i in range(sp.shape[1]):
 
-            q_delta = Quaternion().from_axis_angle(sp[-3:, i] * dt)
+            q_delta = Quaternion()
+            q_delta.from_axis_angle(sp[-3:, i] * dt)
+
             q_sp = Quaternion(np.float64(sp[0, i]), sp[1:4, i].ravel())
 
-            q_comb = q_sp.__mul__(q_delta)
+            q_comb = q_sp * q_delta
 
             sp_propagated[0:4,i] = q_comb.q
             sp_propagated[4:,i] = sp[4:,i]
@@ -271,14 +285,38 @@ def propagate_measurement(sp, g_w, use_noise=False):
         for i in range(sp.shape[1]):
             q_sp = Quaternion(np.float64(sp[0, i]), sp[1:4, i].ravel())
             q_g = Quaternion(0, g_w.ravel())
-            q_comb = q_sp.__mul__((q_g.__mul__(q_sp.inv())))
 
+            q_comb = q_sp * q_g * q_sp.inv()
             g_prime = q_comb.vec()
 
             sp_propagated[0:3,i] = g_prime
             sp_propagated[3:,i] = sp[-3:,i]
 
         return sp_propagated
+    
+def compute_MM_mean_cov(sp, mean_k1_k, Q):
+    # doesn't account for weights
+    y_bar = np.mean(sp, axis=1).reshape(sp.shape[0], 1)
+    sp_minus_ybar = sp - y_bar
+    sp_minus_ybar_T = sp_minus_ybar.T
+
+    Sigma_yy = Q + sp_minus_ybar @ sp_minus_ybar_T / sp.shape[1]
+
+    quat_mean = Quaternion(np.float64(mean_k1_k[0]), mean_k1_k[1:4].ravel())
+    sp_minus_mean = np.zeros_like(sp)
+    for i in range(sp.shape[1]):
+        quat_sp = Quaternion()
+        quat_sp.from_axis_angle(sp[0:3, i])
+        quat_err = quat_sp * quat_mean.inv()
+        #scalar element going negative...
+        aa_err = quat_err.axis_angle()
+        sp_minus_mean[0:3, i] = aa_err
+        sp_minus_mean[3:, i] = sp[3:, i] - y_bar[-3:,0]
+
+    Sigma_xy = sp_minus_mean @ sp_minus_ybar_T / sp.shape[1]
+
+    return y_bar, Sigma_yy, Sigma_xy
+
 
 def estimate_rot(data_num=1):
     # TODO: factor in WARNINGS from handout (negative axes, etc.)
@@ -287,21 +325,21 @@ def estimate_rot(data_num=1):
     accel, gyro, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon = preprocess_dataset(data_num)
 
     ### (1) Initialize Parameters
-    # init state
-    state_0 = State(np.array([1, 0, 0, 0]), np.array([0, 0, 0]))
     # init covariance matrix
     cov_0 = np.eye(6, 6)
+    # init state
+    state_0 = State(np.array([1, 0, 0, 0, 0, 0, 0]).reshape(7,1), cov_0)
     # init process noise covariance matrix
-    R = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10]])
+    R = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10])
     # init measurement noise covariance matrix
-    Q = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10]])
+    Q = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10])
     # init gravity vector
     g_w = np.array([0, 0, -9.81])
 
     means = [state_0]
     mean_k_k = state_0.quat_state_vec
     cov_k_k = cov_0
-    
+
     for t in range(T_sensor.size - 1):
         ### (2) Add Noise Component to Covariance
         dt = T_sensor[t+1] - T_sensor[t]
@@ -317,22 +355,47 @@ def estimate_rot(data_num=1):
         mean_k1_k, cov_k1_k = compute_GD_update(sp_propagated, means[t])
 
         ### (6) Compute Sigma Points with Updated Mean and Covariance
-        sp = generate_sigma_points(mean_k1_k, cov_k1_k)
+        sp_measurement = generate_sigma_points(mean_k1_k, cov_k1_k)
 
         ### (7) Propagate Sigma Points Thru Measurement Model
-        sp_propagated = propagate_measurement(sp, g_w, use_noise=False)
+        # Note: rotation component of these new sp's are in axis-angle space (6,2n) NOT quaternion space (7,2n)
+        sp_measurement_propagated = propagate_measurement(sp_measurement, g_w, use_noise=False)
 
-        ### (8) Compute Mean and Covariance of Propagated Sigma Points
+        ### (8) Compute Mean and Covariance of Measurement-Model Propagated Sigma Points
+        sp_propagated_mean, Sigma_yy, Sigma_xy = compute_MM_mean_cov(sp_measurement_propagated, mean_k1_k, Q)
 
+        ### (9) Compute Kalman Gain
+        K = Sigma_xy @ np.linalg.inv(Sigma_yy)
 
+        ### (10) Compute Innovation, Update Mean and Covariance
+        K_x_innovation = K @ (np.vstack((accel[:, t+1].reshape(3,1), gyro[:, t+1].reshape(3,1))) - sp_propagated_mean)
+        quat_Ki = Quaternion()
+        quat_Ki.from_axis_angle(K_x_innovation[0:3, 0])
+        K_x_innovation_quat = np.vstack((quat_Ki.q.reshape(4,1), K_x_innovation[3:]))
+
+        mean_k1_k1 = mean_k1_k +  K_x_innovation_quat
+        cov_k1_k1 = cov_k1_k - K @ Sigma_yy @ K.T
+
+        means.append(State(mean_k1_k1, cov_k1_k1))
+
+        cov_k_k = cov_k1_k1
+        mean_k_k = mean_k1_k1
+
+    roll, pitch, yaw = np.zeros(T_sensor.size), np.zeros(T_sensor.size), np.zeros(T_sensor.size)
+    for i in range(len(means)):
+        state_i_eas = means[i].quat.euler_angles()
+        roll[i] = state_i_eas[0]
+        pitch[i] = state_i_eas[1]
+        yaw[i] = state_i_eas[2]
 
     # roll, pitch, yaw are numpy arrays of length T
-    # return roll,pitch,yaw
-    return 0
+    return roll,pitch,yaw
+    # return 0
 
 #### TESTING ####
 if __name__ == '__main__':
-    _ = estimate_rot(1)
+    # _ = estimate_rot(1)
+    roll, pitch, yaw = estimate_rot(1)
 
     # test_mean = np.array([0, 1, 2, 3, 4, 5, 6]).reshape(7,1) + 3
     # test_cov  = np.eye(6,6)
