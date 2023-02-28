@@ -17,7 +17,8 @@ def load_imu_data(data_num):
     # (1x5645) array of timestamps | (6x5645) array of measurements
     imu = io.loadmat('imu/imuRaw' + str(data_num) + '.mat') 
     accel = imu['vals'][0:3, :] # (3, 5645) array of ADC ints
-    gyro  = imu['vals'][3:6, :] # (3, 5645) array of ADC ints
+    # for gyro we're given w_z, w_x, w_y ordering!!! so convert to x,y,z below
+    gyro  = np.vstack((imu['vals'][4, :], imu['vals'][5, :], imu['vals'][3, :])) # (3, 5645) array of ADC ints
     T = np.shape(imu['ts'])[1]  # number of timesteps = 5645
     ts = imu['ts'][0] - imu['ts'][0][0] # (5645,) array of timestamps
     return accel, gyro, T, ts
@@ -84,17 +85,34 @@ def preprocess_dataset(data_num):
     # Convert ADC readings to physical units
     accel = ADCtoAccel(accel)
     gyro  = ADCtoGyro(gyro)
-    accel[0:2,:] *= -1 # flip readings per Warning
+    # accel[0:2,:] *= -1 # flip readings per Warning
     calibrationPrint(accel, gyro, 'after transform')
 
     # Convert vicon rotation matrices to roll, pitch, yaw
     roll, pitch, yaw = VicontoRPY(vicon['rots'])
 
-    # plotStuff(accel, T_sensor.ravel(), roll, pitch, yaw, T_vicon.ravel())
+    # plotStuff(accel, gyro, T_sensor.ravel(), roll, pitch, yaw, T_vicon.ravel())
 
     return accel, gyro, T_sensor, roll, pitch, yaw, T_vicon
 
-def plotStuff(accel, ts, roll, pitch, yaw, tv):
+def preprocess_dataset_no_vicon(data_num):
+    # Load IMU data
+    accel, gyro, nT, T_sensor = load_imu_data(data_num)
+    
+    calibrationPrint(accel, gyro, 'before transform')
+
+    # Convert ADC readings to physical units
+    accel = ADCtoAccel(accel)
+    gyro  = ADCtoGyro(gyro)
+    accel[0:2,:] *= -1 # flip readings per Warning
+
+    calibrationPrint(accel, gyro, 'after transform')
+
+    # plotStuff(accel, T_sensor.ravel(), roll, pitch, yaw, T_vicon.ravel())
+
+    return accel, gyro, T_sensor
+
+def plotStuff(accel, gyro, ts, roll, pitch, yaw, tv):
     plt.figure(1)
     plt.plot(ts, accel[0,:])
     plt.plot(ts, accel[1,:])
@@ -105,6 +123,15 @@ def plotStuff(accel, ts, roll, pitch, yaw, tv):
     plt.ylabel('Acceleration (m/s^2)')
 
     plt.figure(2)
+    plt.plot(ts, gyro[0,:])
+    plt.plot(ts, gyro[1,:])
+    plt.plot(ts, gyro[2,:])
+    plt.legend(['x', 'y', 'z'])
+    plt.title('Gyroscope Data')
+    plt.xlabel('Time (s)')
+    plt.ylabel('angular velocity (rad/s)')
+
+    plt.figure(3)
     plt.plot(ts, np.ones(accel.shape[1]) * 9.81, 'k--')
     plt.plot(ts, np.linalg.norm(accel, axis=0), alpha=0.5)
     plt.title('Norm of Accelerometer Data')
@@ -112,7 +139,7 @@ def plotStuff(accel, ts, roll, pitch, yaw, tv):
     plt.xlabel('Time (s)')
     plt.ylabel('Acceleration (m/s^2)')
     
-    plt.figure(3)
+    plt.figure(4)
     plt.plot(tv, roll, alpha=0.75)
     plt.plot(tv, pitch, alpha=0.75)
     plt.plot(tv, yaw, alpha=0.75)
@@ -125,6 +152,61 @@ def plotStuff(accel, ts, roll, pitch, yaw, tv):
     plt.xlabel('Time (s)')
     plt.ylabel('Radians')
     plt.show()
+
+def plotRPY_vs_vicon(r, p, y, t, r_vicon, p_vicon, y_vicon, tv, split = True):
+    if split:
+        fig, ax = plt.subplots(2, 1, figsize=(18, 12))
+
+        ax[0].plot(t, r, alpha=0.75)
+        ax[0].plot(t, p, alpha=0.75)
+        ax[0].plot(t, y, alpha=0.75)
+        ax[0].plot(tv, np.ones_like(tv) * np.pi / 2, 'k--', alpha=0.25)
+        ax[0].plot(tv, np.ones_like(tv) * (-np.pi) / 2, 'k--', alpha=0.25)
+        ax[0].plot(tv, np.ones_like(tv) * np.pi, 'k--', alpha=0.25)
+        ax[0].plot(tv, np.ones_like(tv) * (-np.pi), 'k--', alpha=0.25)
+
+        ax[0].set_title('RPY of IMU')
+        ax[0].legend(['Roll', 'Pitch', 'Yaw'])
+        ax[0].set_xlabel('Time (s)')
+        ax[0].set_ylabel('Radians')
+        ax[0].set_ylim([-1.25*np.pi, 1.25*np.pi])
+
+
+        ax[1].plot(tv, r_vicon, alpha=0.75)
+        ax[1].plot(tv, p_vicon, alpha=0.75)
+        ax[1].plot(tv, y_vicon, alpha=0.75)
+        ax[1].plot(tv, np.ones_like(tv) * np.pi / 2, 'k--', alpha=0.25)
+        ax[1].plot(tv, np.ones_like(tv) * (-np.pi) / 2, 'k--', alpha=0.25)
+        ax[1].plot(tv, np.ones_like(tv) * np.pi, 'k--', alpha=0.25)
+        ax[1].plot(tv, np.ones_like(tv) * (-np.pi), 'k--', alpha=0.25)
+
+        ax[1].set_title('RPY of Vicon')
+        ax[1].legend(['Roll', 'Pitch', 'Yaw'])
+        ax[1].set_xlabel('Time (s)')
+        ax[1].set_ylabel('Radians')
+        ax[1].set_ylim([-1.25*np.pi, 1.25*np.pi])
+
+        plt.show()
+
+    else:
+        plt.plot(t, r, alpha=0.75)
+        plt.plot(t, p, alpha=0.75)
+        plt.plot(t, y, alpha=0.75)
+
+        plt.plot(tv, r_vicon, alpha=0.75)
+        plt.plot(tv, p_vicon, alpha=0.75)
+        plt.plot(tv, y_vicon, alpha=0.75)
+
+        plt.plot(tv, np.ones_like(tv) * np.pi / 2, 'k--', alpha=0.5)
+        plt.plot(tv, np.ones_like(tv) * (-np.pi) / 2, 'k--', alpha=0.5)
+        plt.plot(tv, np.ones_like(tv) * np.pi, 'k--', alpha=0.5)
+        plt.plot(tv, np.ones_like(tv) * (-np.pi), 'k--', alpha=0.5)
+
+        plt.title('RPY vs Vicon RPY')
+        plt.legend(['Roll', 'Pitch', 'Yaw', 'Vicon Roll', 'Vicon Pitch', 'Vicon Yaw'])
+        plt.xlabel('Time (s)')
+        plt.ylabel('Radians')
+        plt.show()
 
 def calibrationPrint(accel, gyro, str=''):
     print("Average of first 500 timesteps:")
@@ -148,7 +230,7 @@ See the IMU manual for more insight.
 
 class State:
     def __init__(self, state_vec, state_cov):
-        self.quat = Quaternion(state_vec[0].astype(np.float64), state_vec[1:4].ravel())
+        self.quat = Quaternion(np.float64(state_vec[0][0]), state_vec[1:4].ravel())
         self.w = state_vec[4:,0]
         self.quat_state_vec = self.with_quat()
         self.cov = state_cov
@@ -171,7 +253,7 @@ def generate_sigma_points(mean, cov):
 
     # offset is (n,2n) array where rows of sqrt(n*cov) become 
     # columns added to mean to create sigma points
-    offset = (np.sqrt(n) * linalg.sqrtm(cov)).T
+    offset = np.real((np.sqrt(n) * linalg.sqrtm(cov)).T)
     offset = np.hstack((offset, -offset))
 
     # initialize sigma points of shape (7,2n)
@@ -286,7 +368,9 @@ def propagate_measurement(sp, g_w, use_noise=False):
             q_sp = Quaternion(np.float64(sp[0, i]), sp[1:4, i].ravel())
             q_g = Quaternion(0, g_w.ravel())
 
-            q_comb = q_sp * q_g * q_sp.inv()
+            #EK paper wrong??? inv first???
+            # q_comb = q_sp * q_g * q_sp.inv()
+            q_comb = q_sp.inv() * q_g * q_sp
             g_prime = q_comb.vec()
 
             sp_propagated[0:3,i] = g_prime
@@ -323,12 +407,14 @@ def estimate_rot(data_num=1):
     # TODO: make weights for sigma points (instead of just doing np.means)
 
     accel, gyro, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon = preprocess_dataset(data_num)
+    # accel, gyro, T_sensor = preprocess_dataset_no_vicon(data_num)
 
     ### (1) Initialize Parameters
     # init covariance matrix
     cov_0 = np.eye(6, 6)
     # init state
     state_0 = State(np.array([1, 0, 0, 0, 0, 0, 0]).reshape(7,1), cov_0)
+    state_0.quat.from_axis_angle(-np.pi*np.array([0, 0, 1]))
     # init process noise covariance matrix
     R = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10])
     # init measurement noise covariance matrix
@@ -341,6 +427,7 @@ def estimate_rot(data_num=1):
     cov_k_k = cov_0
 
     for t in range(T_sensor.size - 1):
+
         ### (2) Add Noise Component to Covariance
         dt = T_sensor[t+1] - T_sensor[t]
         cov_k_k += R * dt
@@ -380,6 +467,10 @@ def estimate_rot(data_num=1):
 
         cov_k_k = cov_k1_k1
         mean_k_k = mean_k1_k1
+        if t > 0 and t % 500 == 0:
+            print(f'End of Loop {t}')
+
+    print(f'No. of Timesteps Processed: {len(means)}')
 
     roll, pitch, yaw = np.zeros(T_sensor.size), np.zeros(T_sensor.size), np.zeros(T_sensor.size)
     for i in range(len(means)):
@@ -388,14 +479,18 @@ def estimate_rot(data_num=1):
         pitch[i] = state_i_eas[1]
         yaw[i] = state_i_eas[2]
 
+    plotStuff(accel, gyro, T_sensor.ravel(), roll_gt, pitch_gt, yaw_gt, T_vicon.ravel())
+    plotRPY_vs_vicon(roll, pitch, yaw, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon)
+
     # roll, pitch, yaw are numpy arrays of length T
     return roll,pitch,yaw
-    # return 0
+
 
 #### TESTING ####
 if __name__ == '__main__':
     # _ = estimate_rot(1)
     roll, pitch, yaw = estimate_rot(1)
+    print(f'DONE')
 
     # test_mean = np.array([0, 1, 2, 3, 4, 5, 6]).reshape(7,1) + 3
     # test_cov  = np.eye(6,6)
