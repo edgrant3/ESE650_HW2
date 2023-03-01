@@ -16,7 +16,7 @@ class Quaternion:
         return self.q[1:4]
 
     def axis_angle(self):
-        self.normalize() #Evan added this
+        # self.normalize() #Evan added this
         # print(f'SCALAR: {self.scalar()}')
         theta = 2*math.acos(self.scalar())
         vec = self.vec()
@@ -26,7 +26,7 @@ class Quaternion:
         return vec*theta
 
     def euler_angles(self):
-        self.normalize() #Evan added this
+        # self.normalize() #evan added this
         phi = math.atan2(2*(self.q[0]*self.q[1]+self.q[2]*self.q[3]), \
                 1 - 2*(self.q[1]**2 + self.q[2]**2))
         theta = math.asin(2*(self.q[0]*self.q[2] - self.q[3]*self.q[1]))
@@ -42,7 +42,7 @@ class Quaternion:
             axis = np.array([1,0,0])
         self.q[0] = math.cos(angle/2)
         self.q[1:4] = axis*math.sin(angle/2)
-        #self.normalize()
+        # self.normalize() #Evan added this
 
     def from_rotm(self, R):
         theta = math.acos((np.trace(R)-1)/2)

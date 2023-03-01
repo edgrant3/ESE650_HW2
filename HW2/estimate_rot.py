@@ -31,6 +31,11 @@ def load_vicon_data(data_num):
     tv = vicon['ts'][0] - vicon['ts'][0][0] # (5645,) array of timestamps
     return vicon, tv
 
+def auto_compute_bias_and_sensitivity(accel, gyro):
+    # Compute bias and sensitivity for accelerometer and gyroscope
+    # Output: accel_bias, accel_sensitivity, gyro_bias, gyro_sensitivity
+    return 0
+
 def ADCtoAccel(adc):
     '''
     Converts ADC readings from accelerometer to m/s^2
@@ -48,7 +53,7 @@ def ADCtoGyro(adc, convert_to_rad=True):
     Output: gyr - (float np.array shape (3, N)) angular velocity in rad/s
     z,x,y ordering!!!
     '''
-    bias        = np.array([369.68, 373.568, 375.356]).reshape(3,1)       # (mV)
+    bias        = np.array([373.568, 375.356, 369.68]).reshape(3,1)       # (mV)
     sensitivity = np.array([200, 200, 200]).reshape(3,1) # (mV/(rad/sec))
     if convert_to_rad:
         return (adc.astype(np.float64) - bias) * 3300 / (1023 * sensitivity) 
@@ -259,7 +264,7 @@ def generate_sigma_points(mean, cov):
     # initialize sigma points of shape (7,2n)
     # and merely add the angular velocity (last 3) copmponents to the offset
     sig_pts = np.zeros((mean.shape[0], 2*n))
-    sig_pts[-3:, :] += offset[-3:, :]
+    sig_pts[-3:, :] = mean[-3:] + offset[-3:, :]
 
     # must convert first 3 elements of offset term to 4-element quaternion
     # then "add" them via quaternion multiplication
@@ -273,7 +278,7 @@ def generate_sigma_points(mean, cov):
     return sig_pts
 
 
-def compute_GD_update(sig_pts, prev_state, threshold = 0.1):
+def compute_GD_update(sig_pts, prev_state, threshold = 0.001):
     # TODO: rewrite/check function to match study group notes
 
     # Initialize mean quat to previous state's quaternion
@@ -283,18 +288,25 @@ def compute_GD_update(sig_pts, prev_state, threshold = 0.1):
     mean_err = np.inf
 
     # Iterate until error is below threshold
-    while mean_err > threshold:
+    max_counts = 150
+    count = 0
+    while mean_err > threshold and max_counts > count:
         for i in range(sig_pts.shape[1]):
             # Convert sigma point to quaternion
             q_i = Quaternion(np.float64(sig_pts[0, i]), sig_pts[1:4, i].ravel())
             # Compute error quaternion
             q_err = q_i.__mul__(q_bar.inv())
             # Convert error quaternion to axis-angle representation
+            q_err.normalize()
             E[:, i] = q_err.axis_angle()
 
         e_bar = np.mean(E, axis=1)
-        q_bar.from_axis_angle(e_bar)
+        e_bar_quat = Quaternion()
+        e_bar_quat.from_axis_angle(e_bar)
+
+        q_bar = e_bar_quat * q_bar
         mean_err = np.linalg.norm(e_bar)
+        count += 1
 
     new_mean = np.zeros((7,1))
     new_mean[0:4] = q_bar.q.reshape(4,1)
@@ -378,26 +390,32 @@ def propagate_measurement(sp, g_w, use_noise=False):
 
         return sp_propagated
     
-def compute_MM_mean_cov(sp, mean_k1_k, Q):
+def compute_MM_mean_cov(sp_p, sp_m, mean_k1_k, Q):
+    # sp_p = dynamics propagated sigma points
+    # sp_m = measurement propagated sigma points
+    
     # doesn't account for weights
-    y_bar = np.mean(sp, axis=1).reshape(sp.shape[0], 1)
-    sp_minus_ybar = sp - y_bar
+    y_bar = np.mean(sp_m, axis=1).reshape(sp_m.shape[0], 1)
+
+    sp_minus_ybar = sp_m - y_bar
     sp_minus_ybar_T = sp_minus_ybar.T
 
-    Sigma_yy = Q + sp_minus_ybar @ sp_minus_ybar_T / sp.shape[1]
+    Sigma_yy = Q + sp_minus_ybar @ sp_minus_ybar_T / sp_m.shape[1]
 
     quat_mean = Quaternion(np.float64(mean_k1_k[0]), mean_k1_k[1:4].ravel())
-    sp_minus_mean = np.zeros_like(sp)
-    for i in range(sp.shape[1]):
-        quat_sp = Quaternion()
-        quat_sp.from_axis_angle(sp[0:3, i])
-        quat_err = quat_sp * quat_mean.inv()
+
+    sp_minus_mean = np.zeros_like(sp_m)
+    for i in range(sp_m.shape[1]):
+        quat_sp_p = Quaternion(np.float64(sp_p[0, i]), sp_p[1:4, i].ravel())
+        # quat_sp.from_axis_angle(sp[0:3, i])
+        quat_err = quat_sp_p * quat_mean.inv()
         #scalar element going negative...
+        quat_err.normalize()
         aa_err = quat_err.axis_angle()
         sp_minus_mean[0:3, i] = aa_err
-        sp_minus_mean[3:, i] = sp[3:, i] - y_bar[-3:,0]
+        sp_minus_mean[3:, i] = sp_p[-3:, i] - mean_k1_k[-3:, 0]
 
-    Sigma_xy = sp_minus_mean @ sp_minus_ybar_T / sp.shape[1]
+    Sigma_xy = sp_minus_mean @ sp_minus_ybar_T / sp_p.shape[1]
 
     return y_bar, Sigma_yy, Sigma_xy
 
@@ -408,17 +426,18 @@ def estimate_rot(data_num=1):
 
     accel, gyro, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon = preprocess_dataset(data_num)
     # accel, gyro, T_sensor = preprocess_dataset_no_vicon(data_num)
+    # plotStuff(accel, gyro, T_sensor.ravel(), roll_gt, pitch_gt, yaw_gt, T_vicon.ravel())
 
     ### (1) Initialize Parameters
     # init covariance matrix
-    cov_0 = np.eye(6, 6)
+    cov_0 = np.eye(6, 6) * 0.1
     # init state
     state_0 = State(np.array([1, 0, 0, 0, 0, 0, 0]).reshape(7,1), cov_0)
     state_0.quat.from_axis_angle(-np.pi*np.array([0, 0, 1]))
     # init process noise covariance matrix
-    R = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10])
+    R = np.diag([0.10, 0.10, 0.10, 0.10, 0.10, 0.10])
     # init measurement noise covariance matrix
-    Q = np.diag([0.05, 0.05, 0.05, 0.10, 0.10, 0.10])
+    Q = np.diag([0.10, 0.10, 0.10, 0.10, 0.10, 0.10])
     # init gravity vector
     g_w = np.array([0, 0, -9.81])
 
@@ -427,7 +446,6 @@ def estimate_rot(data_num=1):
     cov_k_k = cov_0
 
     for t in range(T_sensor.size - 1):
-
         ### (2) Add Noise Component to Covariance
         dt = T_sensor[t+1] - T_sensor[t]
         cov_k_k += R * dt
@@ -449,7 +467,7 @@ def estimate_rot(data_num=1):
         sp_measurement_propagated = propagate_measurement(sp_measurement, g_w, use_noise=False)
 
         ### (8) Compute Mean and Covariance of Measurement-Model Propagated Sigma Points
-        sp_propagated_mean, Sigma_yy, Sigma_xy = compute_MM_mean_cov(sp_measurement_propagated, mean_k1_k, Q)
+        sp_propagated_mean, Sigma_yy, Sigma_xy = compute_MM_mean_cov(sp_propagated, sp_measurement_propagated, mean_k1_k, Q)
 
         ### (9) Compute Kalman Gain
         K = Sigma_xy @ np.linalg.inv(Sigma_yy)
@@ -474,12 +492,13 @@ def estimate_rot(data_num=1):
 
     roll, pitch, yaw = np.zeros(T_sensor.size), np.zeros(T_sensor.size), np.zeros(T_sensor.size)
     for i in range(len(means)):
+        means[i].quat.normalize()
         state_i_eas = means[i].quat.euler_angles()
         roll[i] = state_i_eas[0]
         pitch[i] = state_i_eas[1]
         yaw[i] = state_i_eas[2]
 
-    plotStuff(accel, gyro, T_sensor.ravel(), roll_gt, pitch_gt, yaw_gt, T_vicon.ravel())
+    
     plotRPY_vs_vicon(roll, pitch, yaw, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon)
 
     # roll, pitch, yaw are numpy arrays of length T
