@@ -31,10 +31,42 @@ def load_vicon_data(data_num):
     tv = vicon['ts'][0] - vicon['ts'][0][0] # (5645,) array of timestamps
     return vicon, tv
 
-def auto_compute_bias_and_sensitivity(accel, gyro):
+def discard_outliers(array, deviations = 3):
+    #takes in a (n, m) array and returns a (n, m') array where m' <= m
+    mean = np.mean(array, axis=1).reshape(array.shape[0],1)
+    std = np.std(array, axis=1).reshape(array.shape[0],1)
+    no_outliers = np.any(abs(array - mean) < deviations*std, axis=0)
+    # print(f'removed {array.shape[1] - np.sum(no_outliers)} outliers')
+    return array[:, no_outliers]
+
+def auto_cal_window(accel, gyro, step = 50):
     # Compute bias and sensitivity for accelerometer and gyroscope
     # Output: accel_bias, accel_sensitivity, gyro_bias, gyro_sensitivity
-    return 0
+    # baseline = np.linalg.norm(np.mean(accel[:, 0:step], axis=1))
+
+    baseline = discard_outliers(accel[:, 0:step])
+    base_mean = np.mean(baseline, axis=1)
+
+    n = 1
+    while n < (accel.shape[1] - step)/step:
+
+        new = discard_outliers(accel[:, n*step:(n+1)*step])
+        new_mean = np.mean(new, axis=1)
+        base_std = np.std(baseline, axis=1)
+
+        # print('norms: ', np.linalg.norm(new_mean), np.linalg.norm(base_mean))
+        # print('stdev: ', np.std(baseline, axis=1))
+
+        if np.linalg.norm(new_mean - base_mean) > np.maximum(np.linalg.norm(base_std), 0.1):
+            break
+
+        baseline = np.hstack((baseline, new))
+        n += 1
+        base_mean = ((n-1) * base_mean + new_mean) / n
+    
+    valid_cal_window = n * step
+               
+    return valid_cal_window
 
 def ADCtoAccel(adc):
     '''
@@ -62,7 +94,6 @@ def ADCtoGyro(adc, convert_to_rad=True):
 
 def VicontoRPY(vicon_rots):
     '''
-    COPILOT WRITTEN - CHECK THIS
     Converts Vicon rotation matrices to roll, pitch, yaw
     Input:  vicon - (float np.array shape (3, 3, N)) rotation matrices
     Output: roll  - (float np.array shape (N,)) roll angles in radians
@@ -80,35 +111,72 @@ def VicontoRPY(vicon_rots):
         roll[i], pitch[i], yaw[i] = q.euler_angles()
     return roll, pitch, yaw
 
+def calibrate_imu(accel, gyro, cal_window):
+
+    accel_bias        = np.array([510.808, 500.994, 499])
+    accel_sensitivity = np.array([340.5, 340.5, 342.25])
+    gyro_bias        = np.array([373.568, 375.356, 369.68])
+    gyro_sensitivity = np.array([200, 200, 200])
+
+    # accelerometer
+    accel_bias = np.mean(accel[:, 0:cal_window], axis=1)
+    mean_z = accel_bias[2]
+    accel_bias[2] = np.mean(accel_bias[0:2])
+    s = (mean_z - accel_bias[2]) * 3300 / 1023
+    accel_sensitivity = np.ones((3,)) * s
+
+    # gyro
+    gyro_bias = np.mean(gyro[:, 0:cal_window], axis=1)
+    gyro_sensitivity = np.array([200, 200, 200]) # (mV/(rad/sec))
+
+    converted_accel = (accel.astype(np.float64) - accel_bias.reshape(3,1)) * 3300 / (1023 * accel_sensitivity.reshape(3,1)) * 9.81
+    converted_gyro = (gyro.astype(np.float64) - gyro_bias.reshape(3,1)) * 3300 / (1023 * gyro_sensitivity.reshape(3,1))
+
+    # print(f'biases: {accel_bias}, {gyro_bias}')
+    # print(f'sensitivities: {accel_sensitivity}, {gyro_sensitivity}')
+
+    return converted_accel, converted_gyro
+
+
 def preprocess_dataset(data_num):
     # Load IMU data
     accel, gyro, nT, T_sensor = load_imu_data(data_num)
-    
-    vicon, T_vicon = load_vicon_data(data_num)
-    calibrationPrint(accel, gyro, 'before transform')
 
-    # Convert ADC readings to physical units
-    accel = ADCtoAccel(accel)
-    gyro  = ADCtoGyro(gyro)
-    # accel[0:2,:] *= -1 # flip readings per Warning
+    cal_window = auto_cal_window(accel, gyro, step = 100)
+    cal_time = T_sensor[cal_window]
+    print(f'Calibration Window: {T_sensor[cal_window]}')
+
+    calibrationPrint(accel, gyro, 'before transform')
+    # Compute bias and sensitivity for accelerometer and gyroscope
+    accel, gyro = calibrate_imu(accel, gyro, cal_window)
+    
+    # # Convert ADC readings to physical units
+    # accel = ADCtoAccel(accel)
+    # gyro  = ADCtoGyro(gyro)
+    accel[0:2,:] *= -1 # flip readings per Warning
     calibrationPrint(accel, gyro, 'after transform')
 
+    vicon, T_vicon = load_vicon_data(data_num)
     # Convert vicon rotation matrices to roll, pitch, yaw
     roll, pitch, yaw = VicontoRPY(vicon['rots'])
 
     # plotStuff(accel, gyro, T_sensor.ravel(), roll, pitch, yaw, T_vicon.ravel())
 
-    return accel, gyro, T_sensor, roll, pitch, yaw, T_vicon
+    return accel, gyro, T_sensor, roll, pitch, yaw, T_vicon, cal_time
 
 def preprocess_dataset_no_vicon(data_num):
     # Load IMU data
     accel, gyro, nT, T_sensor = load_imu_data(data_num)
-    
+
+    cal_window = auto_cal_window(accel, gyro, step = 100)
+    cal_time = T_sensor[cal_window]
+
     calibrationPrint(accel, gyro, 'before transform')
 
     # Convert ADC readings to physical units
-    accel = ADCtoAccel(accel)
-    gyro  = ADCtoGyro(gyro)
+    accel, gyro = calibrate_imu(accel, gyro, cal_window)
+    # accel = ADCtoAccel(accel)
+    # gyro  = ADCtoGyro(gyro)
     accel[0:2,:] *= -1 # flip readings per Warning
 
     calibrationPrint(accel, gyro, 'after transform')
@@ -158,10 +226,11 @@ def plotStuff(accel, gyro, ts, roll, pitch, yaw, tv):
     plt.ylabel('Radians')
     plt.show()
 
-def plotRPY_vs_vicon(r, p, y, t, r_vicon, p_vicon, y_vicon, tv, split = True):
+def plotRPY_vs_vicon(r, p, y, t, r_vicon, p_vicon, y_vicon, tv, cal_time, split = True):
     if split:
         fig, ax = plt.subplots(2, 1, figsize=(18, 12))
 
+        ax[0].vlines(np.array([0, cal_time]), -np.pi, np.pi, linestyles='dashed', label='Calibration Window')
         ax[0].plot(t, r, alpha=0.75)
         ax[0].plot(t, p, alpha=0.75)
         ax[0].plot(t, y, alpha=0.75)
@@ -424,10 +493,10 @@ def estimate_rot(data_num=1):
     # TODO: factor in WARNINGS from handout (negative axes, etc.)
     # TODO: make weights for sigma points (instead of just doing np.means)
 
-    accel, gyro, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon = preprocess_dataset(data_num)
-    # accel, gyro, T_sensor = preprocess_dataset_no_vicon(data_num)
-    # plotStuff(accel, gyro, T_sensor.ravel(), roll_gt, pitch_gt, yaw_gt, T_vicon.ravel())
-
+    # accel, gyro, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon, cal_time = preprocess_dataset(data_num)
+    accel, gyro, T_sensor = preprocess_dataset_no_vicon(data_num)
+    # plotStuff(accel, gyro, T_sensor.ravel(), roll_gt, pitch_gt, yaw_gt, T_vicon.ravel())    
+    
     ### (1) Initialize Parameters
     # init covariance matrix
     cov_0 = np.eye(6, 6) * 0.1
@@ -499,22 +568,14 @@ def estimate_rot(data_num=1):
         yaw[i] = state_i_eas[2]
 
     
-    plotRPY_vs_vicon(roll, pitch, yaw, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon)
+    # plotRPY_vs_vicon(roll, pitch, yaw, T_sensor, roll_gt, pitch_gt, yaw_gt, T_vicon, cal_time)
 
     # roll, pitch, yaw are numpy arrays of length T
     return roll,pitch,yaw
 
 
-#### TESTING ####
-if __name__ == '__main__':
-    # _ = estimate_rot(1)
-    roll, pitch, yaw = estimate_rot(1)
-    print(f'DONE')
-
-    # test_mean = np.array([0, 1, 2, 3, 4, 5, 6]).reshape(7,1) + 3
-    # test_cov  = np.eye(6,6)
-    # print(test_mean)
-    # print(test_cov)
-
-    # test_sig_pts = generate_sigma_points(test_mean, test_cov)
-    # print(test_sig_pts.shape)
+# #### TESTING ####
+# if __name__ == '__main__':
+#     # _ = estimate_rot(1)
+#     roll, pitch, yaw = estimate_rot(3)
+#     print(f'DONE')
